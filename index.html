@@ -1,0 +1,267 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Archive Editor — Fish Gang Co.</title>
+<link rel="stylesheet" href="/css/theme.css">
+<script src="/js/perf-tier.js"></script>
+<style>
+  html, body { height: 100%; overflow: hidden; }
+  body { display: flex; flex-direction: column; }
+  #app { flex: 1; display: flex; min-height: 0; background: var(--deep); }
+  .ae-sidebar { width: 260px; background: var(--surface); border-right: 1px solid var(--border); display: flex; flex-direction: column; overflow-y: auto; flex-shrink: 0; padding: var(--sp-3); }
+  .ae-sidebar h4 { font-family: var(--font-display); font-size: 0.75rem; text-transform: uppercase; color: var(--text-dim); margin: var(--sp-3) 0 var(--sp-2); }
+  .ae-sidebar h4:first-child { margin-top: 0; }
+  .ae-main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+  .ae-toolbar { padding: var(--sp-2) var(--sp-3); background: var(--surface); border-bottom: 1px solid var(--border); font-family: var(--font-display); font-size: 0.82rem; color: var(--text-dim); }
+  .ae-list { flex: 1; overflow-y: auto; padding: var(--sp-3); }
+  .ae-entry { display: flex; align-items: center; gap: var(--sp-2); padding: var(--sp-2) var(--sp-3); background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); margin-bottom: 6px; cursor: pointer; }
+  .ae-entry:hover { border-color: var(--accent); }
+  .ae-entry .path { flex: 1; font-family: var(--font-display); font-size: 0.85rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .ae-entry .size { color: var(--text-dim); font-size: 0.78rem; }
+  .ae-entry .del { color: var(--text-dim); }
+  .ae-entry .del:hover { color: var(--danger); }
+  textarea#editorArea { flex: 1; background: var(--deep); color: var(--text); border: none; padding: var(--sp-3); font-family: var(--font-display); font-size: 13px; resize: none; outline: none; display: none; }
+  .ae-empty { flex: 1; display: flex; align-items: center; justify-content: center; color: var(--text-dim); text-align: center; padding: var(--sp-4); }
+</style>
+</head>
+<body>
+
+<header class="site-header">
+  <nav class="nav-bar">
+    <a href="/Company" class="brand"><span class="dot">●</span> Fish Gang Co.</a>
+    <ul class="nav-links">
+      <li><a href="/Company">Company</a></li>
+      <li><a href="/Appstore">Appstore</a></li>
+      <li><a href="/Developers">Tools &amp; APIs</a></li>
+      <li><a href="/Archive-Editor" class="active">Archive Editor</a></li>
+    </ul>
+    <button class="nav-toggle" id="navToggle" aria-label="Open menu" aria-expanded="false">☰</button>
+  </nav>
+  <div class="nav-drawer" id="navDrawer">
+    <a href="/Company">Company</a>
+    <a href="/Code-Studio">Code Studio</a>
+    <a href="/Image-Workstation">Image Workstation</a>
+    <a href="/Skibidi-Playground">Skibidi Playground</a>
+  </div>
+</header>
+
+<div id="app">
+  <aside class="ae-sidebar">
+    <h4>Pack a folder</h4>
+    <input type="file" id="packInput" webkitdirectory multiple style="font-size: 0.8rem; color: var(--text-dim);">
+
+    <h4>Unpack a .fol</h4>
+    <input type="file" id="unpackInput" accept=".fol" style="font-size: 0.8rem; color: var(--text-dim);">
+
+    <h4>Edit in place</h4>
+    <input type="file" id="editInput" accept=".fol" style="font-size: 0.8rem; color: var(--text-dim);">
+
+    <h4>Save changes</h4>
+    <button class="btn btn-primary btn-block" id="repackBtn" disabled>Re-pack &amp; download</button>
+
+    <p class="text-dim mt-4" style="font-size: 0.78rem;">.fol is a JSON manifest + raw concatenated bytes. Renaming the extension never corrupts it.</p>
+  </aside>
+
+  <div class="ae-main">
+    <div class="ae-toolbar" id="statusBar">No archive loaded</div>
+    <div class="ae-list" id="entryList">
+      <div class="ae-empty"><p>Load a .fol file to edit, or pack a folder on the left.</p></div>
+    </div>
+    <textarea id="editorArea" placeholder="Select a text entry to edit its contents…" spellcheck="false"></textarea>
+  </div>
+</div>
+
+<footer class="site-footer">
+  Built by <a href="https://fish-gang.netlify.app/Company" target="_blank" rel="noopener noreferrer">Fish Gang Co.</a> · MIT licensed
+</footer>
+
+<script src="/js/theme-toggle.js"></script>
+<script src="/lib/fol.js"></script>
+<script>
+(function () {
+  'use strict';
+
+  var navToggle = document.getElementById('navToggle');
+  var navDrawer = document.getElementById('navDrawer');
+  navToggle.addEventListener('click', function () {
+    var open = navDrawer.classList.toggle('open');
+    navToggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+  });
+
+  var currentEntries = [];
+  var activeIndex = null;
+
+  var statusBar = document.getElementById('statusBar');
+  var entryList = document.getElementById('entryList');
+  var editorArea = document.getElementById('editorArea');
+  var repackBtn = document.getElementById('repackBtn');
+
+  function save(blob, name) {
+    var a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = name;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(function () { URL.revokeObjectURL(a.href); }, 1000);
+  }
+
+  function setStatus(text) { statusBar.textContent = text; }
+
+  function isText(path) {
+    return /\.(txt|html?|css|js|json|md|csv|xml|svg|ya?ml|fol)$/i.test(path);
+  }
+
+  function resetEditor() {
+    editorArea.value = '';
+    editorArea.disabled = true;
+    editorArea.style.display = 'none';
+  }
+
+  function render() {
+    entryList.textContent = '';
+
+    if (currentEntries.length === 0) {
+      var empty = document.createElement('div');
+      empty.className = 'ae-empty';
+      empty.innerHTML = '<p>Load a .fol file to edit, or pack a folder on the left.</p>';
+      entryList.appendChild(empty);
+      repackBtn.disabled = true;
+      return;
+    }
+
+    currentEntries.forEach(function (entry, idx) {
+      var row = document.createElement('div');
+      row.className = 'ae-entry';
+
+      var path = document.createElement('span');
+      path.className = 'path';
+      path.textContent = '📄 ' + entry.p;
+      path.addEventListener('click', function () { openEntry(idx); });
+
+      var size = document.createElement('span');
+      size.className = 'size';
+      size.textContent = entry.data.byteLength + ' B';
+
+      var del = document.createElement('span');
+      del.className = 'del';
+      del.textContent = '✕';
+      del.addEventListener('click', function (e) {
+        e.stopPropagation();
+        currentEntries.splice(idx, 1);
+        if (activeIndex === idx) { activeIndex = null; resetEditor(); }
+        else if (activeIndex !== null && idx < activeIndex) activeIndex--;
+        render();
+      });
+
+      row.appendChild(path);
+      row.appendChild(size);
+      row.appendChild(del);
+      entryList.appendChild(row);
+    });
+
+    repackBtn.disabled = false;
+  }
+
+  function openEntry(idx) {
+    activeIndex = idx;
+    var entry = currentEntries[idx];
+    editorArea.style.display = 'block';
+    if (isText(entry.p)) {
+      editorArea.disabled = false;
+      editorArea.value = new TextDecoder().decode(entry.data);
+    } else {
+      editorArea.disabled = true;
+      editorArea.value = '(binary file — ' + entry.data.byteLength + ' bytes, not editable as text)';
+    }
+    setStatus('Editing ' + entry.p + ' — ' + entry.data.byteLength + ' B');
+  }
+
+  document.getElementById('packInput').addEventListener('change', async function (e) {
+    var files = Array.prototype.slice.call(e.target.files || []);
+    if (files.length === 0) return;
+    setStatus('Packing ' + files.length + ' files…');
+    try {
+      var entries = [];
+      for (var i = 0; i < files.length; i++) {
+        entries.push({
+          path: files[i].webkitRelativePath || files[i].name,
+          data: new Uint8Array(await files[i].arrayBuffer())
+        });
+      }
+      var archive = fol.pack(entries);
+      var rootName = entries[0].path.split('/')[0] || 'archive';
+      save(new Blob([archive], { type: 'application/fol' }), rootName + '.fol');
+      setStatus('Packed ' + entries.length + ' files into ' + rootName + '.fol');
+    } catch (err) {
+      setStatus('Error: ' + err.message);
+    }
+    e.target.value = '';
+  });
+
+  document.getElementById('unpackInput').addEventListener('change', async function (e) {
+    var file = (e.target.files || [])[0];
+    if (!file) return;
+    setStatus('Unpacking ' + file.name + '…');
+    try {
+      var entries = fol.unpack(new Uint8Array(await file.arrayBuffer()));
+      for (var i = 0; i < entries.length; i++) {
+        save(new Blob([entries[i].data]), entries[i].path.replace(/\//g, '_'));
+        await new Promise(function (r) { setTimeout(r, 100); });
+      }
+      setStatus('Unpacked ' + entries.length + ' files.');
+    } catch (err) {
+      setStatus('Error: ' + err.message);
+    }
+    e.target.value = '';
+  });
+
+  document.getElementById('editInput').addEventListener('change', async function (e) {
+    var file = (e.target.files || [])[0];
+    if (!file) return;
+    setStatus('Loading ' + file.name + '…');
+    try {
+      var entries = fol.unpack(new Uint8Array(await file.arrayBuffer()));
+      currentEntries = entries.map(function (entry) {
+        return { p: entry.path, data: entry.data };
+      });
+      activeIndex = null;
+      resetEditor();
+      render();
+      setStatus('Loaded ' + currentEntries.length + ' files — select one to edit.');
+    } catch (err) {
+      currentEntries = [];
+      render();
+      setStatus('Error: ' + err.message);
+    }
+    e.target.value = '';
+  });
+
+  editorArea.addEventListener('input', function (e) {
+    if (activeIndex === null) return;
+    currentEntries[activeIndex].data = new TextEncoder().encode(e.target.value);
+    var rows = entryList.querySelectorAll('.ae-entry');
+    if (rows[activeIndex]) {
+      rows[activeIndex].querySelector('.size').textContent =
+        currentEntries[activeIndex].data.byteLength + ' B';
+    }
+  });
+
+  repackBtn.addEventListener('click', function () {
+    if (currentEntries.length === 0) return;
+    try {
+      var archive = fol.pack(currentEntries.map(function (entry) {
+        return { path: entry.p, data: entry.data };
+      }));
+      save(new Blob([archive], { type: 'application/fol' }), 'edited.fol');
+      setStatus('Re-packed ' + currentEntries.length + ' files into edited.fol');
+    } catch (err) {
+      setStatus('Error: ' + err.message);
+    }
+  });
+})();
+</script>
+</body>
+</html>
